@@ -1,0 +1,23 @@
+[Unit]
+Description=ZTunnel Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=ztunnel
+Group=ztunnel
+ExecStart=/usr/local/bin/ztunnel-relay
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+Environment=PORT=8080
+Environment=ZTUNNEL_DOMAIN=yourdomain.com
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

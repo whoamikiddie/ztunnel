@@ -1,0 +1,15 @@
+[package]
+name = "ztunnel-shared"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+libzcrypto = []
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"
