@@ -5,6 +5,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    rootDir: .
     envVars:
       - key: ZTUNNEL_DOMAIN
         value: connectus.net.in
