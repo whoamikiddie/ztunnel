@@ -1,0 +1,14 @@
+# https://render.com/docs/deploy
+services:
+  - type: web
+    name: ztunnel-relay
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: ZTUNNEL_DOMAIN
+        value: connectus.net.in
+      - key: PORT
+        value: 8080
+      - key: RUST_LOG
+        value: info
