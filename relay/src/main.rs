@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/tunnel", get(ws_handler))
         .route("/health", get(|| async { "OK" }))
-        .route("/*path", any(proxy_handler))
+        .fallback(any(proxy_handler))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
