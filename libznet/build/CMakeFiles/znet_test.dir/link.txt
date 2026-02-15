@@ -1,1 +1,0 @@
-/usr/bin/cc -I../include -O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/znet_test.dir/tests/test_all.c.o -o znet_test  libznet.a

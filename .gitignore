@@ -1,6 +1,7 @@
 # Build artifacts
 /target/
 /libzcrypto/build/
+/libznet/build/
 
 # IDE
 .idea/
