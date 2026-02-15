@@ -3,7 +3,7 @@ services:
   - type: web
     name: ztunnel-relay
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./relay/Dockerfile
     dockerContext: .
     rootDir: .
     envVars:

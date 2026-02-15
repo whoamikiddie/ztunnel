@@ -1,0 +1,5 @@
+/Users/zoro/project/ztunnel/libznet/build/CMakeFiles/znet.dir
+/Users/zoro/project/ztunnel/libznet/build/CMakeFiles/znet_test.dir
+/Users/zoro/project/ztunnel/libznet/build/CMakeFiles/test.dir
+/Users/zoro/project/ztunnel/libznet/build/CMakeFiles/edit_cache.dir
+/Users/zoro/project/ztunnel/libznet/build/CMakeFiles/rebuild_cache.dir

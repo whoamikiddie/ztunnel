@@ -14,8 +14,15 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+async-stream = "0.3"
+
+# Inspector dashboard (local axum server)
+axum = { workspace = true }

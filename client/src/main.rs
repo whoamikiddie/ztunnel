@@ -4,11 +4,17 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
 mod tunnel;
 mod proxy;
+mod inspector;
+mod config;
+mod multi;
+
+use inspector::{InspectorEntry, InspectorState};
 
 #[derive(Parser)]
 #[command(name = "ztunnel")]
@@ -38,11 +44,25 @@ enum Commands {
         /// Custom subdomain
         #[arg(short, long)]
         subdomain: Option<String>,
+
+        /// Disable inspector dashboard
+        #[arg(long)]
+        no_inspect: bool,
+
+        /// Inspector dashboard port
+        #[arg(long, default_value = "4040")]
+        inspect_port: u16,
     },
     /// Expose TCP service
     Tcp {
         /// Local port to expose
         port: u16,
+    },
+    /// Start tunnels from config file (ztunnel.yml)
+    Start {
+        /// Path to config file (default: auto-detect)
+        #[arg(short, long)]
+        config: Option<String>,
     },
 }
 
@@ -61,19 +81,109 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Http { port, subdomain } => {
-            run_http_tunnel(&cli.relay, port, subdomain).await?;
+        Commands::Http { port, subdomain, no_inspect, inspect_port } => {
+            run_http_tunnel(&cli.relay, port, subdomain, !no_inspect, inspect_port).await?;
         }
         Commands::Tcp { port } => {
             run_tcp_tunnel(&cli.relay, port).await?;
+        }
+        Commands::Start { config: config_path } => {
+            run_multi_tunnel(config_path).await?;
         }
     }
 
     Ok(())
 }
 
-/// Run HTTP tunnel
-async fn run_http_tunnel(relay_url: &str, local_port: u16, subdomain: Option<String>) -> Result<()> {
+/// Run multi-tunnel mode from config file
+async fn run_multi_tunnel(config_path: Option<String>) -> Result<()> {
+    let path = if let Some(p) = config_path {
+        std::path::PathBuf::from(p)
+    } else {
+        config::ZTunnelConfig::find_config()
+            .ok_or_else(|| anyhow::anyhow!("No config file found. Create ztunnel.yml or specify --config"))?
+    };
+
+    let cfg = config::ZTunnelConfig::load(&path)?;
+    info!("Loaded config from {}", path.display());
+
+    // Setup inspector
+    let (replay_tx, mut replay_rx) = mpsc::channel::<String>(32);
+    let (entry_tx, mut entry_rx) = mpsc::channel::<InspectorEntry>(256);
+    let inspector = InspectorState::new(replay_tx);
+
+    // Start inspector server if enabled
+    if cfg.inspector.enabled {
+        let insp = inspector.clone();
+        let port = cfg.inspector.port;
+        tokio::spawn(async move {
+            inspector::start_inspector(insp, port).await;
+        });
+    }
+
+    // Pipe entries from tunnels to inspector
+    let insp2 = inspector.clone();
+    tokio::spawn(async move {
+        while let Some(entry) = entry_rx.recv().await {
+            insp2.record(entry).await;
+        }
+    });
+
+    // Handle replay requests
+    let cfg_clone = cfg.clone();
+    let entry_tx_clone = entry_tx.clone();
+    tokio::spawn(async move {
+        while let Some(id) = replay_rx.recv().await {
+            info!("Replaying request: {}", id);
+            let insp = InspectorState::new(tokio::sync::mpsc::channel(1).0);
+            if let Some(entry) = insp.get_entry(&id).await {
+                info!("Found entry for replay: {} {}", entry.method, entry.path);
+            }
+        }
+    });
+
+    let mut manager = multi::TunnelManager::new(cfg, inspector, entry_tx);
+    manager.start_all().await?;
+
+    println!("\n  Inspector: http://localhost:{}\n", cfg_clone.inspector.port);
+    println!("Press Ctrl+C to stop all tunnels\n");
+
+    manager.wait_for_shutdown().await;
+    Ok(())
+}
+
+/// Run HTTP tunnel with optional inspector
+async fn run_http_tunnel(
+    relay_url: &str,
+    local_port: u16,
+    subdomain: Option<String>,
+    inspect: bool,
+    inspect_port: u16,
+) -> Result<()> {
+    // Setup inspector
+    let (replay_tx, mut replay_rx) = mpsc::channel::<String>(32);
+    let inspector = InspectorState::new(replay_tx);
+
+    if inspect {
+        let insp = inspector.clone();
+        tokio::spawn(async move {
+            inspector::start_inspector(insp, inspect_port).await;
+        });
+    }
+
+    // Handle replay requests
+    let insp_for_replay = inspector.clone();
+    let relay_for_replay = relay_url.to_string();
+    tokio::spawn(async move {
+        while let Some(id) = replay_rx.recv().await {
+            info!("Replay request: {}", id);
+            if let Some(entry) = insp_for_replay.get_entry(&id).await {
+                // Re-execute the request against local server
+                let _ = replay_local_request(&entry, local_port).await;
+            }
+        }
+    });
+
     info!("Connecting to relay: {}", relay_url);
     
     let (ws_stream, _) = connect_async(relay_url)
@@ -103,6 +213,9 @@ async fn run_http_tunnel(relay_url: &str, local_port: u16, subdomain: Option<Str
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!("║  Public URL: {:<47} ║", url);
             println!("║  Local:      http://localhost:{:<34} ║", local_port);
+            if inspect {
+                println!("║  Inspector:  http://localhost:{:<34} ║", inspect_port);
+            }
             println!("╚══════════════════════════════════════════════════════════════╝\n");
             println!("Press Ctrl+C to stop the tunnel\n");
         } else {
@@ -118,8 +231,10 @@ async fn run_http_tunnel(relay_url: &str, local_port: u16, subdomain: Option<Str
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
-                        // Parse and forward HTTP request to local server
-                        if let Err(e) = handle_tunnel_request(&data, local_port, &mut write).await {
+                        let start = std::time::Instant::now();
+                        if let Err(e) = handle_tunnel_request_with_inspector(
+                            &data, local_port, &mut write, &inspector, start
+                        ).await {
                             warn!("Error handling request: {}", e);
                         }
                     }
@@ -148,11 +263,13 @@ async fn run_http_tunnel(relay_url: &str, local_port: u16, subdomain: Option<Str
     Ok(())
 }
 
-/// Handle incoming tunnel request and forward to local server
-async fn handle_tunnel_request<S>(
+/// Handle tunnel request with inspector recording
+async fn handle_tunnel_request_with_inspector<S>(
     data: &[u8],
     local_port: u16,
     write: &mut S,
+    inspector: &InspectorState,
+    start: std::time::Instant,
 ) -> Result<()>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -160,7 +277,9 @@ where
 {
     let request: tunnel::TunnelRequest = serde_json::from_slice(data)?;
     info!("Proxying {} {} to localhost:{}", request.method, request.path, local_port);
+    
     let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port)).await?;
+    
     let mut http_request = format!(
         "{} {} HTTP/1.1\r\nHost: localhost:{}\r\n",
         request.method, request.path, local_port
@@ -172,13 +291,17 @@ where
         http_request.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     http_request.push_str("\r\n");
+    
     stream.write_all(http_request.as_bytes()).await?;
     if let Some(body) = &request.body {
         stream.write_all(body).await?;
     }
+    
+    // Read response
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     let mut header_end = None;
+    
     for _ in 0..64 {
         let n = stream.read(&mut tmp).await?;
         if n == 0 { break; }
@@ -190,13 +313,15 @@ where
             }
         }
     }
-    let (status, headers, mut body) = if let Some(hend) = header_end {
+    
+    let (status, headers, body) = if let Some(hend) = header_end {
         let header_bytes = &buf[..hend];
         let mut lines = header_bytes.split(|b| *b == b'\r' || *b == b'\n').filter(|l| !l.is_empty());
         let status_line = lines.next().unwrap_or(&[]);
         let status = parse_status_code(status_line).unwrap_or(200);
         let mut headers_vec: Vec<(String, String)> = Vec::new();
         let mut content_len: Option<usize> = None;
+        
         for line in lines {
             if let Some((k, v)) = split_header_kv(line) {
                 if k.eq_ignore_ascii_case("content-length") {
@@ -207,6 +332,7 @@ where
                 headers_vec.push((k.to_string(), v.to_string()));
             }
         }
+        
         let mut body = buf[hend + 4..].to_vec();
         if let Some(cl) = content_len {
             while body.len() < cl {
@@ -222,26 +348,76 @@ where
     } else {
         (200, Vec::new(), buf)
     };
+    
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let body_size = body.len();
+    
+    // Send tunnel response
     let response = tunnel::TunnelResponse {
-        id: request.id,
+        id: request.id.clone(),
         status,
-        headers,
-        body: Some(body),
+        headers: headers.clone(),
+        body: Some(body.clone()),
     };
     let response_data = serde_json::to_vec(&response)?;
     write
         .send(Message::Binary(response_data.into()))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
+    
+    // Record in inspector
+    let entry = InspectorEntry {
+        id: request.id,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        method: request.method,
+        path: request.path,
+        status,
+        latency_ms,
+        req_headers: request.headers,
+        req_body: request.body.map(|b| String::from_utf8_lossy(&b).to_string()),
+        res_headers: headers,
+        res_body: Some(String::from_utf8_lossy(&body).to_string()),
+        res_body_size: body_size,
+    };
+    inspector.record(entry).await;
+    
     Ok(())
 }
 
-fn find_header_end(buf: &[u8]) -> Option<usize> {
+/// Replay a request against the local server
+async fn replay_local_request(entry: &InspectorEntry, local_port: u16) -> Result<()> {
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
+
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port)).await?;
+
+    let mut http_request = format!(
+        "{} {} HTTP/1.1\r\nHost: localhost:{}\r\n",
+        entry.method, entry.path, local_port
+    );
+    for (key, value) in &entry.req_headers {
+        http_request.push_str(&format!("{}: {}\r\n", key, value));
+    }
+    http_request.push_str("\r\n");
+
+    stream.write_all(http_request.as_bytes()).await?;
+    if let Some(body) = &entry.req_body {
+        stream.write_all(body.as_bytes()).await?;
+    }
+
+    let mut response = vec![0u8; 65536];
+    let n = stream.read(&mut response).await?;
+    info!("Replay response: {} bytes", n);
+
+    Ok(())
+}
+
+// Helper functions (pub(crate) for use in multi.rs)
+pub(crate) fn find_header_end(buf: &[u8]) -> Option<usize> {
     let pat = b"\r\n\r\n";
     buf.windows(4).position(|w| w == pat)
 }
 
-fn parse_status_code(line: &[u8]) -> Option<u16> {
+pub(crate) fn parse_status_code(line: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(line).ok()?;
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() >= 2 {
@@ -251,7 +427,7 @@ fn parse_status_code(line: &[u8]) -> Option<u16> {
     }
 }
 
-fn split_header_kv(line: &[u8]) -> Option<(&str, &str)> {
+pub(crate) fn split_header_kv(line: &[u8]) -> Option<(&str, &str)> {
     let s = std::str::from_utf8(line).ok()?;
     let mut iter = s.splitn(2, ':');
     let k = iter.next()?.trim();
@@ -269,7 +445,6 @@ async fn run_tcp_tunnel(relay_url: &str, local_port: u16) -> Result<()> {
     
     let (mut write, mut read) = ws_stream.split();
     
-    // Send registration
     let registration = serde_json::json!({
         "type": "tcp",
         "local_port": local_port,
@@ -277,7 +452,6 @@ async fn run_tcp_tunnel(relay_url: &str, local_port: u16) -> Result<()> {
     
     write.send(Message::Text(registration.to_string().into())).await?;
     
-    // Wait for confirmation and get assigned port
     if let Some(Ok(Message::Text(text))) = read.next().await {
         let response: serde_json::Value = serde_json::from_str(&text)?;
         
@@ -292,18 +466,15 @@ async fn run_tcp_tunnel(relay_url: &str, local_port: u16) -> Result<()> {
         }
     }
     
-    // TCP forwarding loop
     loop {
         tokio::select! {
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
-                        // Forward raw TCP data to local port
                         if let Ok(mut stream) = tokio::net::TcpStream::connect(
                             format!("127.0.0.1:{}", local_port)
                         ).await {
                             let _ = stream.write_all(&data).await;
-                            
                             let mut response = vec![0u8; 65536];
                             if let Ok(n) = stream.read(&mut response).await {
                                 response.truncate(n);

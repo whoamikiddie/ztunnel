@@ -1,0 +1,2 @@
+/usr/bin/ar qc libznet.a CMakeFiles/znet.dir/src/udp_engine.c.o CMakeFiles/znet.dir/src/throttle.c.o CMakeFiles/znet.dir/src/connpool.c.o
+/usr/bin/ranlib libznet.a

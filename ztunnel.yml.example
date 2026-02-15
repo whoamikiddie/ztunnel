@@ -1,0 +1,30 @@
+# ZTunnel Configuration Example
+# Save as ztunnel.yml in your project root
+
+relay: wss://ztunnel.onrender.com/tunnel
+# auth_token: "your-secret-token"
+
+inspector:
+  enabled: true
+  port: 4040
+
+tunnels:
+  - name: web
+    proto: http
+    local_port: 3000
+    subdomain: my-app
+    inspect: true
+
+  - name: api
+    proto: http
+    local_port: 8000
+    subdomain: my-api
+    inspect: true
+
+  - name: database
+    proto: tcp
+    local_port: 5432
+
+# ip_filter:
+#   allow: ["192.168.1.0/24"]
+#   deny: ["10.0.0.0/8"]
