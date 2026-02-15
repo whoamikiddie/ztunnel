@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 ztunnel-shared = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

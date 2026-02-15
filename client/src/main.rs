@@ -158,49 +158,105 @@ where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    // Parse tunnel request
     let request: tunnel::TunnelRequest = serde_json::from_slice(data)?;
-    
     info!("Proxying {} {} to localhost:{}", request.method, request.path, local_port);
-    
-    // Connect to local server
     let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port)).await?;
-    
-    // Build HTTP request
     let mut http_request = format!(
         "{} {} HTTP/1.1\r\nHost: localhost:{}\r\n",
         request.method, request.path, local_port
     );
-    
     for (key, value) in &request.headers {
         http_request.push_str(&format!("{}: {}\r\n", key, value));
     }
+    if let Some(body) = &request.body {
+        http_request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
     http_request.push_str("\r\n");
-    
     stream.write_all(http_request.as_bytes()).await?;
-    
     if let Some(body) = &request.body {
         stream.write_all(body).await?;
     }
-    
-    // Read response
-    let mut response_buf = vec![0u8; 65536];
-    let n = stream.read(&mut response_buf).await?;
-    response_buf.truncate(n);
-    
-    // Parse response (simplified)
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut header_end = None;
+    for _ in 0..64 {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 { break; }
+        buf.extend_from_slice(&tmp[..n]);
+        if header_end.is_none() {
+            if let Some(pos) = find_header_end(&buf) {
+                header_end = Some(pos);
+                break;
+            }
+        }
+    }
+    let (status, headers, mut body) = if let Some(hend) = header_end {
+        let header_bytes = &buf[..hend];
+        let mut lines = header_bytes.split(|b| *b == b'\r' || *b == b'\n').filter(|l| !l.is_empty());
+        let status_line = lines.next().unwrap_or(&[]);
+        let status = parse_status_code(status_line).unwrap_or(200);
+        let mut headers_vec: Vec<(String, String)> = Vec::new();
+        let mut content_len: Option<usize> = None;
+        for line in lines {
+            if let Some((k, v)) = split_header_kv(line) {
+                if k.eq_ignore_ascii_case("content-length") {
+                    if let Ok(cl) = v.trim().parse::<usize>() {
+                        content_len = Some(cl);
+                    }
+                }
+                headers_vec.push((k.to_string(), v.to_string()));
+            }
+        }
+        let mut body = buf[hend + 4..].to_vec();
+        if let Some(cl) = content_len {
+            while body.len() < cl {
+                let n = stream.read(&mut tmp).await?;
+                if n == 0 { break; }
+                body.extend_from_slice(&tmp[..n]);
+            }
+            if body.len() > cl {
+                body.truncate(cl);
+            }
+        }
+        (status, headers_vec, body)
+    } else {
+        (200, Vec::new(), buf)
+    };
     let response = tunnel::TunnelResponse {
         id: request.id,
-        status: 200, // Would parse from actual response
-        headers: vec![],
-        body: Some(response_buf),
+        status,
+        headers,
+        body: Some(body),
     };
-    
     let response_data = serde_json::to_vec(&response)?;
-    write.send(Message::Binary(response_data.into())).await
+    write
+        .send(Message::Binary(response_data.into()))
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
-    
     Ok(())
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    let pat = b"\r\n\r\n";
+    buf.windows(4).position(|w| w == pat)
+}
+
+fn parse_status_code(line: &[u8]) -> Option<u16> {
+    let s = std::str::from_utf8(line).ok()?;
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() >= 2 {
+        parts[1].parse::<u16>().ok()
+    } else {
+        None
+    }
+}
+
+fn split_header_kv(line: &[u8]) -> Option<(&str, &str)> {
+    let s = std::str::from_utf8(line).ok()?;
+    let mut iter = s.splitn(2, ':');
+    let k = iter.next()?.trim();
+    let v = iter.next()?.trim();
+    Some((k, v))
 }
 
 /// Run TCP tunnel

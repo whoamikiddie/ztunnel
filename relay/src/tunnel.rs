@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use dashmap::DashMap;
 
 /// Unique tunnel identifier
 pub type TunnelId = String;
@@ -15,6 +17,8 @@ pub struct Tunnel {
     pub tx: mpsc::Sender<Vec<u8>>,
     /// Tunnel metadata
     pub created_at: std::time::Instant,
+    /// Pending request correlation map
+    pub pending_requests: Arc<DashMap<String, oneshot::Sender<TunnelResponse>>>,
 }
 
 impl Tunnel {
@@ -23,6 +27,7 @@ impl Tunnel {
             subdomain,
             tx,
             created_at: std::time::Instant::now(),
+            pending_requests: Arc::new(DashMap::new()),
         }
     }
 
