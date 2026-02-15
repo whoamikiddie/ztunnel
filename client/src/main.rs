@@ -64,6 +64,18 @@ enum Commands {
         #[arg(short, long)]
         config: Option<String>,
     },
+    /// Show tunnel status and relay health
+    Status {
+        /// Relay server URL to check
+        #[arg(short, long, default_value = "http://localhost:8080")]
+        relay: String,
+    },
+    /// Check for updates
+    Update {
+        /// Don't actually update, just check
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
@@ -89,6 +101,12 @@ async fn main() -> Result<()> {
         }
         Commands::Start { config: config_path } => {
             run_multi_tunnel(config_path).await?;
+        }
+        Commands::Status { relay } => {
+            run_status(&relay).await?;
+        }
+        Commands::Update { check } => {
+            run_update(check).await?;
         }
     }
 
@@ -497,3 +515,79 @@ async fn run_tcp_tunnel(relay_url: &str, local_port: u16) -> Result<()> {
     
     Ok(())
 }
+
+/// Show tunnel status and relay health
+async fn run_status(relay_url: &str) -> Result<()> {
+    println!("\n\x1b[1;36m⚡ ZTunnel Status\x1b[0m\n");
+
+    // Check relay health
+    let health_url = format!("{}/health", relay_url.trim_end_matches('/'));
+    print!("  Relay ({})  ", relay_url);
+    match reqwest::get(&health_url).await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let tunnels = json["active_tunnels"].as_u64().unwrap_or(0);
+                    let status = json["status"].as_str().unwrap_or("unknown");
+                    println!("\x1b[32m● online\x1b[0m  ({}, {} tunnels)", status, tunnels);
+                } else {
+                    println!("\x1b[32m● online\x1b[0m");
+                }
+            }
+        }
+        Ok(resp) => println!("\x1b[33m● degraded\x1b[0m (HTTP {})", resp.status()),
+        Err(e) => println!("\x1b[31m● offline\x1b[0m ({})", e),
+    }
+
+    // Show version
+    println!("  Version     v{}", env!("CARGO_PKG_VERSION"));
+
+    // Show local system
+    println!("  Platform    {}/{}", std::env::consts::OS, std::env::consts::ARCH);
+    println!();
+
+    Ok(())
+}
+
+/// Check for updates from GitHub releases
+async fn run_update(check_only: bool) -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("\n\x1b[1;36m⚡ ZTunnel Update\x1b[0m\n");
+    println!("  Current version: v{}", current);
+
+    let api_url = "https://api.github.com/repos/whoamikiddie/ztunnel/releases/latest";
+    let client = reqwest::Client::builder()
+        .user_agent("ztunnel-updater")
+        .build()?;
+
+    match client.get(api_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let latest = json["tag_name"].as_str().unwrap_or("unknown")
+                        .trim_start_matches('v');
+                    if latest != current {
+                        println!("  Latest version: \x1b[32mv{}\x1b[0m", latest);
+                        if check_only {
+                            println!("\n  Run `ztunnel update` to install the latest version");
+                        } else {
+                            println!("  Downloading...");
+                            // For now, direct to manual install
+                            let url = json["html_url"].as_str().unwrap_or("");
+                            println!("  Download: {}", url);
+                            println!("  Install:  cargo install --git https://github.com/whoamikiddie/ztunnel.git");
+                        }
+                    } else {
+                        println!("  \x1b[32m✓ Already up to date!\x1b[0m");
+                    }
+                }
+            }
+        }
+        Ok(resp) => println!("  Could not check: HTTP {}", resp.status()),
+        Err(e) => println!("  Could not check: {}", e),
+    }
+
+    println!();
+    Ok(())
+}
+

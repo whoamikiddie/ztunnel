@@ -26,3 +26,6 @@ async-stream = "0.3"
 
 # Inspector dashboard (local axum server)
 axum = { workspace = true }
+
+# CLI status/update
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }

@@ -25,6 +25,9 @@ mod circuit_breaker;
 mod metrics;
 mod tls;
 mod log_export;
+mod headers;
+mod policy;
+mod acme;
 
 use tunnel::Tunnel;
 use metrics::Metrics;
