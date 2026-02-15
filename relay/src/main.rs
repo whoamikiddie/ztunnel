@@ -132,21 +132,46 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
     let cb = circuit_breaker::CircuitBreaker::new(circuit_breaker::CircuitBreakerConfig::default());
-    let tunnel = Tunnel::new(subdomain.clone(), tx, ip_filter_conf, cb.clone());
+
+    // ─── Subdomain conflict resolution ───
+    let final_subdomain = {
+        let tunnels = state.tunnels.read().await;
+        if tunnels.contains_key(&subdomain) {
+            // Subdomain taken → append random suffix
+            let suffix = gen_subdomain_short();
+            let alt = format!("{}-{}", subdomain, suffix);
+            warn!("Subdomain '{}' taken, assigning '{}'", subdomain, alt);
+            alt
+        } else {
+            subdomain.clone()
+        }
+    };
+
+    let tunnel = Tunnel::new(final_subdomain.clone(), tx, ip_filter_conf, cb.clone());
     
-    state.tunnels.write().await.insert(subdomain.clone(), tunnel.clone());
+    state.tunnels.write().await.insert(final_subdomain.clone(), tunnel.clone());
     state.metrics.tunnel_opened();
 
-    let url = format!("https://{}.{}", subdomain, state.domain);
-    let resp = serde_json::json!({"success": true, "subdomain": &subdomain, "url": &url});
+    let url = format!("https://{}.{}", final_subdomain, state.domain);
+    let was_reassigned = final_subdomain != subdomain;
+    let resp = serde_json::json!({
+        "success": true,
+        "subdomain": &final_subdomain,
+        "url": &url,
+        "reassigned": was_reassigned,
+    });
     
     if socket.send(Message::Text(resp.to_string().into())).await.is_err() {
-        state.tunnels.write().await.remove(&subdomain);
+        state.tunnels.write().await.remove(&final_subdomain);
         state.metrics.tunnel_closed();
         return;
     }
     
-    info!("Tunnel active: {}", url);
+    if was_reassigned {
+        info!("Tunnel active: {} (requested '{}', was taken)", url, subdomain);
+    } else {
+        info!("Tunnel active: {}", url);
+    }
 
     // Drain any queued requests from circuit breaker
     let queued = cb.drain_queue().await;
@@ -345,6 +370,11 @@ async fn proxy_handler(
 fn gen_subdomain() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     format!("t{:x}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 0xFFFFFF)
+}
+
+fn gen_subdomain_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    format!("{:x}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() % 0xFFF)
 }
 
 fn gen_request_id() -> String {

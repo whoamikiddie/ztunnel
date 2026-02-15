@@ -226,6 +226,7 @@ async fn run_http_tunnel(
         
         if response.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
             let url = response.get("url").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let reassigned = response.get("reassigned").and_then(|v| v.as_bool()).unwrap_or(false);
             println!("\n╔══════════════════════════════════════════════════════════════╗");
             println!("║  🚀 ZTunnel Active                                           ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
@@ -235,6 +236,11 @@ async fn run_http_tunnel(
                 println!("║  Inspector:  http://localhost:{:<34} ║", inspect_port);
             }
             println!("╚══════════════════════════════════════════════════════════════╝\n");
+            if reassigned {
+                println!("\x1b[33m⚠  Subdomain '{}' was taken, assigned '{}' instead\x1b[0m\n",
+                    subdomain.as_deref().unwrap_or("?"),
+                    response.get("subdomain").and_then(|v| v.as_str()).unwrap_or("?"));
+            }
             println!("Press Ctrl+C to stop the tunnel\n");
         } else {
             let err = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
