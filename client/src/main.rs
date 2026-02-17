@@ -52,6 +52,14 @@ enum Commands {
         /// Inspector dashboard port
         #[arg(long, default_value = "4040")]
         inspect_port: u16,
+
+        /// Bandwidth throttle (e.g., "3kbps", "1mbps", "500kb/s")
+        #[arg(long)]
+        throttle: Option<String>,
+
+        /// Artificial latency in milliseconds
+        #[arg(long)]
+        latency: Option<u64>,
     },
     /// Expose TCP service
     Tcp {
@@ -93,8 +101,8 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Http { port, subdomain, no_inspect, inspect_port } => {
-            run_http_tunnel(&cli.relay, port, subdomain, !no_inspect, inspect_port).await?;
+        Commands::Http { port, subdomain, no_inspect, inspect_port, throttle, latency } => {
+            run_http_tunnel(&cli.relay, port, subdomain, !no_inspect, inspect_port, throttle, latency).await?;
         }
         Commands::Tcp { port } => {
             run_tcp_tunnel(&cli.relay, port).await?;
@@ -177,6 +185,8 @@ async fn run_http_tunnel(
     subdomain: Option<String>,
     inspect: bool,
     inspect_port: u16,
+    throttle_spec: Option<String>,
+    latency_ms: Option<u64>,
 ) -> Result<()> {
     // Setup inspector
     let (replay_tx, mut replay_rx) = mpsc::channel::<String>(32);
@@ -187,6 +197,29 @@ async fn run_http_tunnel(
         tokio::spawn(async move {
             inspector::start_inspector(insp, inspect_port).await;
         });
+    }
+
+    // Setup bandwidth throttle
+    let throttle = if let Some(spec) = throttle_spec {
+        match ztunnel_shared::throttle::parse_bandwidth(&spec) {
+            Some(bps) => {
+                info!("Bandwidth throttle: {} bytes/sec", bps);
+                ztunnel_shared::throttle::BandwidthThrottle::new(bps)
+            }
+            None => {
+                warn!("Invalid throttle spec '{}', ignoring", spec);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let throttle = std::sync::Arc::new(tokio::sync::Mutex::new(throttle));
+
+    // Artificial latency
+    let latency = latency_ms.map(std::time::Duration::from_millis);
+    if let Some(lat) = latency {
+        info!("Artificial latency: {:?}", lat);
     }
 
     // Handle replay requests
@@ -256,8 +289,9 @@ async fn run_http_tunnel(
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
                         let start = std::time::Instant::now();
+                        let throttle_clone = throttle.clone();
                         if let Err(e) = handle_tunnel_request_with_inspector(
-                            &data, local_port, &mut write, &inspector, start
+                            &data, local_port, &mut write, &inspector, start, throttle_clone, latency
                         ).await {
                             warn!("Error handling request: {}", e);
                         }
@@ -294,6 +328,8 @@ async fn handle_tunnel_request_with_inspector<S>(
     write: &mut S,
     inspector: &InspectorState,
     start: std::time::Instant,
+    throttle: std::sync::Arc<tokio::sync::Mutex<Option<ztunnel_shared::throttle::BandwidthThrottle>>>,
+    latency: Option<std::time::Duration>,
 ) -> Result<()>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -301,6 +337,11 @@ where
 {
     let request: tunnel::TunnelRequest = serde_json::from_slice(data)?;
     info!("Proxying {} {} to localhost:{}", request.method, request.path, local_port);
+    
+    // Apply artificial latency
+    if let Some(delay) = latency {
+        tokio::time::sleep(delay).await;
+    }
     
     let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", local_port)).await?;
     
@@ -388,6 +429,11 @@ where
         .send(Message::Binary(response_data.into()))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
+    
+    // Apply bandwidth throttle
+    if let Some(ref mut t) = *throttle.lock().await {
+        t.throttle(body_size);
+    }
     
     // Record in inspector
     let entry = InspectorEntry {

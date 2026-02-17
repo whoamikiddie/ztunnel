@@ -1,18 +1,18 @@
 # Build artifacts
-/target/
-/libzcrypto/build/
+/target
 /libznet/build/
+/libzcrypto/build/
+
+# OS files
+.DS_Store
+Thumbs.db
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
 *~
-
-# OS
-.DS_Store
-Thumbs.db
 
 # Environment
 .env
@@ -20,9 +20,3 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Compiled crypto library
-*.a
-*.so
-*.dylib
-*.dll

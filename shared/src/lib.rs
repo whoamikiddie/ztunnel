@@ -5,5 +5,6 @@
 pub mod protocol;
 pub mod crypto;
 pub mod error;
+pub mod throttle;
 
 pub use error::{Error, Result};
