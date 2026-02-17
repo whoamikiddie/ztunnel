@@ -35,6 +35,9 @@ target_compile_options(znet PRIVATE
     -fPIC
 )
 
+# Define _GNU_SOURCE for Linux features (mmsghdr, recvmmsg, sendmmsg)
+target_compile_definitions(znet PRIVATE _GNU_SOURCE)
+
 if(ZNET_HAS_ASM)
     target_compile_definitions(znet PRIVATE ZNET_HAS_ASM=1)
 endif()
