@@ -13,6 +13,13 @@ RUN apt-get update && apt-get install -y \
 # Copy source
 COPY . .
 
+# Build libznet (C/ASM library) first
+RUN cd libznet && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. && \
+    make
+
 # Build release binary
 RUN cargo build --release -p ztunnel-relay
 

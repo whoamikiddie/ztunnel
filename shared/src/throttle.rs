@@ -91,10 +91,10 @@ pub fn parse_bandwidth(s: &str) -> Option<u64> {
         "gbps" | "gbit/s" => 1_000_000_000.0 / 8.0,
         
         // Bytes per second
-        "b/s" | "bps" => 1.0,
-        "kb/s" | "kbps" | "k" => 1_000.0,
-        "mb/s" | "mbps" | "m" => 1_000_000.0,
-        "gb/s" | "gbps" | "g" => 1_000_000_000.0,
+        "b/s" => 1.0,
+        "kb/s" | "k" => 1_000.0,
+        "mb/s" | "m" => 1_000_000.0,
+        "gb/s" | "g" => 1_000_000_000.0,
         
         // IEC units (KiB, MiB, etc.)
         "kib/s" | "ki" => 1_024.0,
